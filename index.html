@@ -123,6 +123,7 @@
                 <p class="font-semibold text-gray-700">PINs de Demostración:</p>
                 <p>• <span class="font-mono bg-gray-200 px-1 rounded font-bold text-slate-700">1234</span> : Perfil <strong>Admin Master</strong> (Control e Inventario Total)</p>
                 <p>• <span class="font-mono bg-gray-200 px-1 rounded font-bold text-slate-700">5678</span> : Perfil <strong>Vendedor@</strong> (Solo POS y Reportes Básicos)</p>
+                <p class="pt-1 text-amber-700">Demostración local: no uses datos reales ni PINs personales.</p>
             </div>
         </div>
     </div>
@@ -153,7 +154,7 @@
         </div>
     </nav>
 
-    <div id="toast-container" class="fixed top-5 right-5 z-50 space-y-2 pointer-events-none"></div>
+    <div id="toast-container" role="status" aria-live="polite" aria-atomic="true" class="fixed top-5 right-5 z-50 space-y-2 pointer-events-none"></div>
 
     <main id="main-layout" class="hidden flex-grow p-4 md:p-8 max-w-7xl w-full mx-auto space-y-8">
         <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
@@ -389,7 +390,63 @@
     <footer class="bg-gray-900 text-center py-4 text-xs text-gray-500 border-t border-gray-800">&copy; 2026 StockMaster Pro. Moneda en Pesos Colombianos (COP).</footer>
 
     <script>
-        let pinConfig = JSON.parse(localStorage.getItem('sm_pro_pins')) || {"1234":"Admin","5678":"Vendedor@"};
+        let storageWarning = false;
+        const unreadableStorageKeys = new Set();
+        const validRoles = new Set(['Admin', 'Vendedor@']);
+        function readStoredValue(key, fallback, isValid) {
+            let rawValue;
+            try {
+                rawValue = localStorage.getItem(key);
+            } catch (error) {
+                storageWarning = true;
+                unreadableStorageKeys.add(key);
+                console.warn(`No se pudo acceder a ${key} en el almacenamiento local.`, error);
+                return fallback;
+            }
+            if (rawValue === null) return fallback;
+
+            let value;
+            try {
+                value = JSON.parse(rawValue);
+            } catch (error) {
+                storageWarning = true;
+                unreadableStorageKeys.add(key);
+                console.warn(`No se pudo leer ${key} desde el almacenamiento local.`, error);
+                return fallback;
+            }
+
+            if (!isValid(value)) {
+                storageWarning = true;
+                unreadableStorageKeys.add(key);
+                console.warn(`El contenido guardado en ${key} no tiene un formato válido.`);
+                return fallback;
+            }
+            return value;
+        }
+        function isValidPins(value) {
+            return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+                Object.entries(value).every(([pin, role]) => /^\d{4}$/.test(pin) && validRoles.has(role)) &&
+                value['1234'] === 'Admin';
+        }
+        function isValidProducts(value) {
+            return Array.isArray(value) && value.every(product =>
+                product && typeof product.sku === 'string' && product.sku.trim() &&
+                typeof product.name === 'string' && product.name.trim() &&
+                typeof product.category === 'string' && product.category.trim() &&
+                Number.isSafeInteger(product.price) && product.price >= 0 &&
+                Number.isSafeInteger(product.stock) && product.stock >= 0 &&
+                Number.isSafeInteger(product.min) && product.min >= 0
+            ) && new Set(value.map(product => product.sku.toLowerCase())).size === value.length;
+        }
+        function isValidHistory(value) {
+            return Array.isArray(value) && value.every(entry =>
+                entry && typeof entry.timestamp === 'string' &&
+                typeof entry.operation === 'string' && typeof entry.item === 'string' &&
+                Number.isFinite(entry.variation) && typeof entry.meta === 'string' &&
+                (entry.user === undefined || typeof entry.user === 'string')
+            );
+        }
+        let pinConfig = readStoredValue('sm_pro_pins', {"1234":"Admin","5678":"Vendedor@"}, isValidPins);
         let currentRole = null;
         let activePinCode = null;
         let currentCartTotal = 0;
@@ -399,16 +456,30 @@
             { sku: "SKU-003", name: "Pack Agua Mineral Natural 6x1.5L", category: "Bebidas", price: 14500, stock: 50, min: 10 },
             { sku: "SKU-004", name: "Arroz Integral Premium 1kg", category: "Abarrotes", price: 6800, stock: 15, min: 8 }
         ];
-        let products = JSON.parse(localStorage.getItem('sm_pro_products')) || initialProducts;
-        let historyLog = JSON.parse(localStorage.getItem('sm_pro_history')) || [{ timestamp: new Date().toLocaleString(), operation: "INICIO", item: "Sistema Inicializado", variation: 0, user: "Sistema", meta: "Éxito" }];
+        let products = readStoredValue('sm_pro_products', initialProducts.map(product => ({ ...product })), isValidProducts);
+        let historyLog = readStoredValue('sm_pro_history', [{ timestamp: new Date().toLocaleString(), operation: "INICIO", item: "Sistema Inicializado", variation: 0, user: "Sistema", meta: "Éxito" }], isValidHistory);
         let cart = [];
-        let totalSalesRevenue = parseFloat(localStorage.getItem('sm_pro_revenue')) || 0;
+        let storedRevenue;
+        try {
+            storedRevenue = localStorage.getItem('sm_pro_revenue');
+        } catch (error) {
+            storageWarning = true;
+            unreadableStorageKeys.add('sm_pro_revenue');
+            console.warn('No se pudo acceder al total de ventas guardado.', error);
+        }
+        let totalSalesRevenue = storedRevenue === null ? 0 : Number(storedRevenue);
+        if (!Number.isFinite(totalSalesRevenue) || totalSalesRevenue < 0) {
+            totalSalesRevenue = 0;
+            storageWarning = true;
+            unreadableStorageKeys.add('sm_pro_revenue');
+            console.warn('El total de ventas guardado no tiene un formato válido.');
+        }
 
         window.onload = () => {
-            syncStorage();
-            document.getElementById('login-pin').addEventListener('keypress', function(e) { if (e.key === 'Enter') attemptLogin(); });
+            document.getElementById('login-pin').addEventListener('keydown', function(e) { if (e.key === 'Enter') attemptLogin(); });
             const posFilter = document.getElementById('pos-search-filter');
             if(posFilter) posFilter.addEventListener('input', populatePosSelect);
+            if (storageWarning) showToast('Hay datos guardados dañados o inaccesibles. No se sobrescribirán; recupera esos datos antes de continuar.', 'warning');
         };
 
         function formatCOP(value) { return '$' + Math.round(value).toLocaleString('es-CO'); }
@@ -418,6 +489,7 @@
             if (pinConfig[pinValue]) {
                 currentRole = pinConfig[pinValue];
                 activePinCode = pinValue;
+                pinInput.value = '';
                 document.getElementById('role-display').innerText = currentRole;
                 document.getElementById('login-overlay').classList.add('hidden');
                 document.getElementById('main-nav').classList.remove('hidden');
@@ -460,10 +532,24 @@
             }
         }
         function syncStorage() {
-            localStorage.setItem('sm_pro_products', JSON.stringify(products));
-            localStorage.setItem('sm_pro_history', JSON.stringify(historyLog));
-            localStorage.setItem('sm_pro_revenue', totalSalesRevenue.toString());
-            localStorage.setItem('sm_pro_pins', JSON.stringify(pinConfig));
+            try {
+                const values = {
+                    sm_pro_products: JSON.stringify(products),
+                    sm_pro_history: JSON.stringify(historyLog),
+                    sm_pro_revenue: totalSalesRevenue.toString(),
+                    sm_pro_pins: JSON.stringify(pinConfig)
+                };
+                Object.entries(values).forEach(([key, value]) => {
+                    if (!unreadableStorageKeys.has(key)) localStorage.setItem(key, value);
+                });
+                if (unreadableStorageKeys.size) {
+                    console.warn('Se guardaron cambios parcialmente; hay secciones que no se pudieron conservar.');
+                    showToast('Cambios guardados parcialmente. Recupera los datos dañados antes de continuar.', 'warning');
+                }
+            } catch (error) {
+                console.error('No se pudieron guardar los cambios en este navegador.', error);
+                showToast('No se pudieron guardar los cambios. Exporta una copia y libera espacio.', 'error');
+            }
         }
         function refreshAllData() {
             renderInventoryTable(); renderDashboardStats(); populateCategoryDropdowns(); populatePosSelect(); renderCartTable(); renderHistoryLogTable(); renderPinTable();
@@ -504,13 +590,76 @@
                 const isLow = product.stock <= product.min;
                 const badgeClass = product.stock === 0 ? 'bg-rose-100 text-rose-800' : (isLow ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800');
                 const badgeText = product.stock === 0 ? 'Agotado' : (isLow ? 'Stock Bajo' : 'Óptimo');
-                const stockControls = isAdmin ? `<div class="flex items-center justify-center gap-2"><button onclick="inlineStockAdjust(${realIdx}, -1)" class="w-6 h-6 flex items-center justify-center bg-gray-100 hover:bg-gray-200 rounded text-xs font-bold">-</button><span class="w-10 font-bold ${isLow ? 'text-rose-600':''}">${product.stock}</span><button onclick="inlineStockAdjust(${realIdx}, 1)" class="w-6 h-6 flex items-center justify-center bg-gray-100 hover:bg-gray-200 rounded text-xs font-bold">+</button></div>` : `<span class="font-bold ${isLow ? 'text-rose-600':''}">${product.stock}</span>`;
-                const actionButtons = isAdmin ? `<div class="flex justify-center gap-3"><button onclick="openFormModal(${realIdx})" class="text-blue-600 hover:text-blue-800" title="Editar">✎</button><button onclick="triggerDeleteModal(${realIdx})" class="text-rose-500 hover:text-rose-700" title="Eliminar">🗑</button></div>` : `<span class="text-xs text-gray-400 italic font-medium">Solo Consulta</span>`;
                 const tr = document.createElement('tr');
                 tr.className = 'hover:bg-slate-50 transition border-b border-gray-100';
-                tr.innerHTML = `<td class="px-6 py-4 font-mono font-semibold text-slate-500">${product.sku}</td><td class="px-6 py-4 font-medium text-slate-900">${product.name}</td><td class="px-6 py-4 text-slate-500">${product.category}</td><td class="px-6 py-4 text-right font-medium">${formatCOP(product.price)}</td><td class="px-6 py-4 text-center">${stockControls}</td><td class="px-6 py-4 text-center"><span class="px-2.5 py-0.5 text-xs font-medium rounded-full ${badgeClass}">${badgeText}</span></td><td class="px-6 py-4 text-center">${actionButtons}</td>`;
+                addTextCell(tr, 'px-6 py-4 font-mono font-semibold text-slate-500', product.sku);
+                addTextCell(tr, 'px-6 py-4 font-medium text-slate-900', product.name);
+                addTextCell(tr, 'px-6 py-4 text-slate-500', product.category);
+                addTextCell(tr, 'px-6 py-4 text-right font-medium', formatCOP(product.price));
+
+                const stockCell = document.createElement('td');
+                stockCell.className = 'px-6 py-4 text-center';
+                if (isAdmin) {
+                    const controls = document.createElement('div');
+                    controls.className = 'flex items-center justify-center gap-2';
+                    const decreaseButton = createButton('-', 'w-6 h-6 flex items-center justify-center bg-gray-100 hover:bg-gray-200 rounded text-xs font-bold', () => inlineStockAdjust(realIdx, -1), `Reducir stock de ${product.name}`);
+                    const stockValue = document.createElement('span');
+                    stockValue.className = `w-10 font-bold ${isLow ? 'text-rose-600' : ''}`;
+                    stockValue.textContent = product.stock;
+                    const increaseButton = createButton('+', 'w-6 h-6 flex items-center justify-center bg-gray-100 hover:bg-gray-200 rounded text-xs font-bold', () => inlineStockAdjust(realIdx, 1), `Aumentar stock de ${product.name}`);
+                    controls.append(decreaseButton, stockValue, increaseButton);
+                    stockCell.appendChild(controls);
+                } else {
+                    const stockValue = document.createElement('span');
+                    stockValue.className = `font-bold ${isLow ? 'text-rose-600' : ''}`;
+                    stockValue.textContent = product.stock;
+                    stockCell.appendChild(stockValue);
+                }
+                tr.appendChild(stockCell);
+
+                const statusCell = document.createElement('td');
+                statusCell.className = 'px-6 py-4 text-center';
+                const badge = document.createElement('span');
+                badge.className = `px-2.5 py-0.5 text-xs font-medium rounded-full ${badgeClass}`;
+                badge.textContent = badgeText;
+                statusCell.appendChild(badge);
+                tr.appendChild(statusCell);
+
+                const actionsCell = document.createElement('td');
+                actionsCell.className = 'px-6 py-4 text-center';
+                if (isAdmin) {
+                    const actions = document.createElement('div');
+                    actions.className = 'flex justify-center gap-3';
+                    actions.append(
+                        createButton('✎', 'text-blue-600 hover:text-blue-800', () => openFormModal(realIdx), `Editar ${product.name}`),
+                        createButton('🗑', 'text-rose-500 hover:text-rose-700', () => triggerDeleteModal(realIdx), `Eliminar ${product.name}`)
+                    );
+                    actionsCell.appendChild(actions);
+                } else {
+                    const readOnly = document.createElement('span');
+                    readOnly.className = 'text-xs text-gray-400 italic font-medium';
+                    readOnly.textContent = 'Solo Consulta';
+                    actionsCell.appendChild(readOnly);
+                }
+                tr.appendChild(actionsCell);
                 tbody.appendChild(tr);
             });
+        }
+        function addTextCell(row, className, value) {
+            const cell = document.createElement('td');
+            cell.className = className;
+            cell.textContent = String(value);
+            row.appendChild(cell);
+            return cell;
+        }
+        function createButton(label, className, onClick, ariaLabel) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = className;
+            button.textContent = label;
+            button.setAttribute('aria-label', ariaLabel);
+            button.addEventListener('click', onClick);
+            return button;
         }
         function renderDashboardStats() {
             const count = products.length;
@@ -540,9 +689,27 @@
             const tbody = document.getElementById('pin-list-body'); if(!tbody) return; tbody.innerHTML = '';
             Object.keys(pinConfig).forEach(pin => {
                 const role = pinConfig[pin]; const canRevoke = pin !== '1234' && pin !== activePinCode;
-                const actionButton = canRevoke ? `<button onclick="triggerDeletePinModal('${pin}')" class="text-rose-500 hover:text-rose-700 font-semibold text-xs">Revocar</button>` : `<span class="text-gray-400 italic text-xs">Protegido</span>`;
                 const tr = document.createElement('tr'); tr.className = 'border-b border-gray-100 text-xs';
-                tr.innerHTML = `<td class="py-2 px-2 tracking-wider font-bold text-blue-600 font-mono">${pin}</td><td class="py-2 px-2"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${role === 'Vendedor@' ? 'bg-blue-50 text-blue-700 border border-blue-100':'bg-purple-50 text-purple-700 border border-purple-100'}">${role}</span></td><td class="py-2 text-center">${actionButton}</td>`;
+                const pinCell = addTextCell(tr, 'py-2 px-2 tracking-wider font-bold text-blue-600 font-mono', '••••');
+                pinCell.setAttribute('aria-label', 'PIN oculto');
+                const roleCell = document.createElement('td');
+                roleCell.className = 'py-2 px-2';
+                const roleBadge = document.createElement('span');
+                roleBadge.className = `px-2 py-0.5 rounded text-[10px] font-bold ${role === 'Vendedor@' ? 'bg-blue-50 text-blue-700 border border-blue-100' : 'bg-purple-50 text-purple-700 border border-purple-100'}`;
+                roleBadge.textContent = role;
+                roleCell.appendChild(roleBadge);
+                tr.appendChild(roleCell);
+                const actionCell = document.createElement('td');
+                actionCell.className = 'py-2 text-center';
+                if (canRevoke) {
+                    actionCell.appendChild(createButton('Revocar', 'text-rose-500 hover:text-rose-700 font-semibold text-xs', () => triggerDeletePinModal(pin), `Revocar PIN de ${role}`));
+                } else {
+                    const protectedLabel = document.createElement('span');
+                    protectedLabel.className = 'text-gray-400 italic text-xs';
+                    protectedLabel.textContent = 'Protegido';
+                    actionCell.appendChild(protectedLabel);
+                }
+                tr.appendChild(actionCell);
                 tbody.appendChild(tr);
             });
         }
@@ -551,9 +718,9 @@
             const input = document.getElementById('new-vendor-pin');
             const roleSelect = document.getElementById('new-pin-role');
             const pin = input.value.trim(); const selectedRole = roleSelect.value;
-            if(pin.length !== 4 || isNaN(pin)) { showToast('El PIN debe constar exactamente de 4 dígitos numéricos', 'error'); return; }
+            if(!/^\d{4}$/.test(pin) || !validRoles.has(selectedRole)) { showToast('El PIN debe tener 4 dígitos y un rol válido', 'error'); return; }
             if(pinConfig[pin]) { showToast('Este código PIN ya se encuentra asignado a un perfil', 'error'); return; }
-            pinConfig[pin] = selectedRole; syncStorage(); refreshAllData(); input.value = ''; showToast(`Nuevo PIN de ${selectedRole} autorizado`); logMovement('SEGURIDAD', `PIN: ${pin}`, 0, `Nivel de acceso '${selectedRole}' otorgado por Admin`);
+            pinConfig[pin] = selectedRole; logMovement('SEGURIDAD', 'Nuevo PIN autorizado', 0, `Nivel de acceso '${selectedRole}' otorgado por Admin`); syncStorage(); refreshAllData(); input.value = ''; showToast(`Nuevo PIN de ${selectedRole} autorizado`);
         }
         function triggerDeletePinModal(pin) {
             if(currentRole !== 'Admin') return;
@@ -562,7 +729,7 @@
             document.getElementById('confirm-modal').classList.remove('hidden');
         }
         function executePinRevocation(pin) {
-            const role = pinConfig[pin]; delete pinConfig[pin]; syncStorage(); closeConfirmModal(); refreshAllData(); showToast('Acceso revocado exitosamente'); logMovement('SEGURIDAD', `PIN: ${pin}`, 0, `Acceso de perfil '${role}' purgado por el Administrador`);
+            const role = pinConfig[pin]; delete pinConfig[pin]; logMovement('SEGURIDAD', 'PIN revocado', 0, `Acceso de perfil '${role}' purgado por el Administrador`); syncStorage(); closeConfirmModal(); refreshAllData(); showToast('Acceso revocado exitosamente');
         }
         function openFormModal(idx = null) {
             if(currentRole !== 'Admin') { showToast('Acción denegada: Requiere perfil Admin', 'error'); return; }
@@ -576,12 +743,17 @@
         function closeFormModal() { document.getElementById('form-modal').classList.add('hidden'); }
         function processProductForm(e) {
             e.preventDefault(); if(currentRole !== 'Admin') return;
-            const idxVal = document.getElementById('form-product-idx').value; const sku = document.getElementById('form-sku').value.trim(); const name = document.getElementById('form-name').value.trim(); const category = document.getElementById('form-cat').value.trim(); const price = parseFloat(document.getElementById('form-price').value); const stock = parseInt(document.getElementById('form-stock').value); const min = parseInt(document.getElementById('form-min').value);
+            const idxVal = document.getElementById('form-product-idx').value; const sku = document.getElementById('form-sku').value.trim(); const name = document.getElementById('form-name').value.trim(); const category = document.getElementById('form-cat').value.trim(); const priceField = document.getElementById('form-price').value; const stockField = document.getElementById('form-stock').value; const minField = document.getElementById('form-min').value; const price = Number(priceField); const stock = Number(stockField); const min = Number(minField);
+            if (!sku || !name || !category || !priceField || !stockField || !minField || !Number.isSafeInteger(price) || price < 0 || !Number.isSafeInteger(stock) || stock < 0 || !Number.isSafeInteger(min) || min < 0) {
+                showToast('Revisa los datos: precio, existencia y alerta deben ser enteros no negativos.', 'error'); return;
+            }
             if(idxVal === '') {
                 if(products.some(p => p.sku.toLowerCase() === sku.toLowerCase())) { showToast('Error: Código SKU duplicado', 'error'); return; }
                 products.push({ sku, name, category, price, stock, min }); logMovement('ALTA', `${sku} - ${name}`, stock, `Creación inicial de catálogo: ${formatCOP(price)}`); showToast('Producto integrado con éxito');
             } else {
-                const idx = parseInt(idxVal); const prevStock = products[idx].stock; products[idx].name = name; products[idx].category = category; products[idx].price = price; products[idx].stock = stock; products[idx].min = min;
+                const idx = Number(idxVal);
+                if (!Number.isInteger(idx) || !products[idx]) { showToast('No se encontró el producto que intentas editar.', 'error'); return; }
+                const prevStock = products[idx].stock; products[idx].name = name; products[idx].category = category; products[idx].price = price; products[idx].stock = stock; products[idx].min = min;
                 if(prevStock !== stock) logMovement('AJUSTE', `${sku} - ${name}`, stock - prevStock, `Modificación manual de stock de ${prevStock} a ${stock}`); else logMovement('ACTUALIZACIÓN', `${sku} - ${name}`, 0, 'Metadatos editados');
                 showToast('Atributos del producto actualizados');
             }
@@ -610,14 +782,16 @@
             const select = document.getElementById('pos-product-select'); const availInput = document.getElementById('pos-available'); if(!select || !select.value || select.value === '') { availInput.value = 0; return; } const p = products[parseInt(select.value)]; availInput.value = p ? p.stock : 0;
         }
         function addToCart() {
-            const select = document.getElementById('pos-product-select'); if(!select || !select.value || select.value === '') return; const pIdx = parseInt(select.value); const targetProd = products[pIdx]; if(!targetProd) return; const qty = parseInt(document.getElementById('pos-qty').value); if(isNaN(qty) || qty <= 0) { showToast('Escribe una cantidad válida superior a 0', 'error'); return; } if(qty > targetProd.stock) { showToast(`Stock insuficiente. Máximo disponible: ${targetProd.stock}`, 'error'); return; }
-            const cartItemIdx = cart.findIndex(c => c.sku === targetProd.sku); if(cartItemIdx > -1) { if(cart[cartItemIdx].qty + qty > targetProd.stock) { showToast(`Suma excede stock total disponible (${targetProd.stock})`, 'error'); return; } cart[cartItemIdx].qty += qty; } else { cart.push({ sku: targetProd.sku, name: targetProd.name, price: targetProd.price, qty: qty, productIdx: pIdx }); }
+            const select = document.getElementById('pos-product-select'); if(!select || !select.value) return; const targetProd = products[Number(select.value)]; if(!targetProd) return; const qty = Number(document.getElementById('pos-qty').value); if(!Number.isSafeInteger(qty) || qty <= 0) { showToast('Escribe una cantidad válida superior a 0', 'error'); return; } if(qty > targetProd.stock) { showToast(`Stock insuficiente. Máximo disponible: ${targetProd.stock}`, 'error'); return; }
+            const cartItemIdx = cart.findIndex(c => c.sku === targetProd.sku); if(cartItemIdx > -1 && cart[cartItemIdx].qty + qty > targetProd.stock) { showToast(`Suma excede stock total disponible (${targetProd.stock})`, 'error'); return; }
+            if (!Number.isSafeInteger(targetProd.price * qty) || !Number.isSafeInteger(currentCartTotal + targetProd.price * qty)) { showToast('El valor de la venta es demasiado grande para procesarlo.', 'error'); return; }
+            if(cartItemIdx > -1) { cart[cartItemIdx].qty += qty; } else { cart.push({ sku: targetProd.sku, name: targetProd.name, price: targetProd.price, qty }); }
             showToast('Agregado al ticket de preparación'); renderCartTable();
         }
         function renderCartTable() {
             const tbody = document.getElementById('pos-cart-body'); const empty = document.getElementById('pos-cart-empty'); tbody.innerHTML = '';
             if(cart.length === 0) { empty.classList.remove('hidden'); currentCartTotal = 0; document.getElementById('pos-cart-total').innerText = '$0'; updateChangeCalculation(); return; }
-            empty.classList.add('hidden'); let total = 0; cart.forEach((item, cIdx) => { const subtotal = item.price * item.qty; total += subtotal; const tr = document.createElement('tr'); tr.className = 'border-b border-gray-50'; tr.innerHTML = `<td class="py-3 font-medium text-slate-800">${item.name}<br><span class="text-xs text-gray-400 font-mono">${item.sku}</span></td><td class="py-3 text-center font-bold">${item.qty}</td><td class="py-3 text-right text-gray-600">${formatCOP(item.price)}</td><td class="py-3 text-right font-semibold text-slate-900">${formatCOP(subtotal)}</td><td class="py-3 text-center"><button onclick="removeFromCart(${cIdx})" class="text-rose-500 hover:text-rose-700 font-medium text-xs">Quitar</button></td>`; tbody.appendChild(tr); }); currentCartTotal = total; document.getElementById('pos-cart-total').innerText = formatCOP(total); updateChangeCalculation();
+            empty.classList.add('hidden'); let total = 0; cart.forEach((item, cIdx) => { const subtotal = item.price * item.qty; total += subtotal; const tr = document.createElement('tr'); tr.className = 'border-b border-gray-50'; const details = addTextCell(tr, 'py-3 font-medium text-slate-800', `${item.name} (${item.sku})`); details.classList.add('break-words'); addTextCell(tr, 'py-3 text-center font-bold', item.qty); addTextCell(tr, 'py-3 text-right text-gray-600', formatCOP(item.price)); addTextCell(tr, 'py-3 text-right font-semibold text-slate-900', formatCOP(subtotal)); const actionCell = addTextCell(tr, 'py-3 text-center', ''); actionCell.appendChild(createButton('Quitar', 'text-rose-500 hover:text-rose-700 font-medium text-xs', () => removeFromCart(cIdx), `Quitar ${item.name}`)); tbody.appendChild(tr); }); currentCartTotal = total; document.getElementById('pos-cart-total').innerText = formatCOP(total); updateChangeCalculation();
         }
         function updateChangeCalculation() {
             const cashInput = document.getElementById('pos-cash-received'); const changeDisplay = document.getElementById('pos-change-delivery'); if(!cashInput || !changeDisplay) return; const cashValue = parseFloat(cashInput.value); if(isNaN(cashValue) || cashValue <= 0) { changeDisplay.innerText = '$0'; changeDisplay.className = 'w-full px-3 py-2 bg-slate-100 border border-gray-200 rounded-lg text-sm text-center font-bold text-slate-500'; return; } const changeResult = cashValue - currentCartTotal; changeDisplay.innerText = formatCOP(changeResult); if(changeResult < 0) changeDisplay.className = 'w-full px-3 py-2 bg-rose-100 border border-rose-300 rounded-lg text-sm text-center font-bold text-rose-700'; else changeDisplay.className = 'w-full px-3 py-2 bg-emerald-100 border border-emerald-300 rounded-lg text-sm text-center font-bold text-emerald-700';
@@ -626,9 +800,18 @@
         function clearCart() { cart = []; const cashInput = document.getElementById('pos-cash-received'); if(cashInput) cashInput.value = ''; renderCartTable(); }
         function checkoutSale() {
             if(cart.length === 0) { showToast('El ticket de venta está vacío', 'warning'); return; }
-            const cashInput = document.getElementById('pos-cash-received'); const cashValue = parseFloat(cashInput.value) || 0; if(cashValue < currentCartTotal) { showToast('Error: El efectivo recibido es insuficiente para cubrir la transacción', 'error'); return; }
-            let transactionTotal = 0; for(let item of cart) { const prod = products[item.productIdx]; if(prod.stock < item.qty) { showToast(`Conflicto de stock de último momento en: ${prod.name}`, 'error'); return; } }
-            cart.forEach(item => { const prod = products[item.productIdx]; prod.stock -= item.qty; const sub = item.price * item.qty; transactionTotal += sub; logMovement('VENTA', `${prod.sku} - ${prod.name}`, -item.qty, `Salida por ticket comercial. Importe: ${formatCOP(sub)}`); });
+            const cashInput = document.getElementById('pos-cash-received'); const cashValue = Number(cashInput.value); if(!Number.isSafeInteger(cashValue) || cashValue < currentCartTotal) { showToast('El efectivo debe ser un valor entero suficiente para cubrir la venta.', 'error'); return; }
+            const saleItems = cart.map(item => ({ item, product: products.find(product => product.sku === item.sku) }));
+            const unavailableItem = saleItems.find(({ item, product }) => !product || !Number.isSafeInteger(item.qty) || item.qty <= 0 || !Number.isSafeInteger(item.price) || item.price < 0 || product.stock < item.qty);
+            if (unavailableItem) { showToast(`No se puede procesar el producto ${unavailableItem.item.name}: revisa su existencia e intenta de nuevo.`, 'error'); return; }
+            let transactionTotal = 0;
+            for (const { item } of saleItems) {
+                const subtotal = item.price * item.qty;
+                if (!Number.isSafeInteger(subtotal) || !Number.isSafeInteger(transactionTotal + subtotal)) { showToast('El valor de la venta es demasiado grande para procesarlo.', 'error'); return; }
+                transactionTotal += subtotal;
+            }
+            if (cashValue < transactionTotal || !Number.isSafeInteger(totalSalesRevenue + transactionTotal)) { showToast('No se puede registrar el importe de esta venta.', 'error'); return; }
+            saleItems.forEach(({ item, product }) => { product.stock -= item.qty; const sub = item.price * item.qty; logMovement('VENTA', `${product.sku} - ${product.name}`, -item.qty, `Salida por ticket comercial. Importe: ${formatCOP(sub)}`); });
             totalSalesRevenue += transactionTotal; cart = []; const filterInput = document.getElementById('pos-search-filter'); if(filterInput) filterInput.value = ''; if(cashInput) cashInput.value = ''; syncStorage(); refreshAllData(); showToast(`¡Venta Procesada! Total cobrado: ${formatCOP(transactionTotal)}`, 'success'); switchTab('ventas');
         }
         function logMovement(operation, skuAndName, variation, desc) {
@@ -640,23 +823,40 @@
             historyLog.forEach(log => {
                 let varClass = 'text-gray-600'; if(log.variation > 0) varClass = 'text-emerald-600 font-bold'; if(log.variation < 0) varClass = 'text-rose-600 font-bold';
                 let displayUser = log.user || 'Sistema'; if (currentRole !== 'Admin') displayUser = displayUser.replace(/\d{4}/g, '••••');
-                const tr = document.createElement('tr'); tr.className = 'border-b border-gray-50 text-xs'; tr.innerHTML = `<td class="px-6 py-2.5 text-gray-400 whitespace-nowrap">${log.timestamp}</td><td class="px-6 py-2.5"><span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-800 border">${log.operation}</span></td><td class="px-6 py-2.5 text-slate-700 font-medium">${log.item}</td><td class="px-6 py-2.5 text-center ${varClass}">${log.variation > 0 ? '+' : ''}${log.variation}</td><td class="px-6 py-2.5 text-center text-blue-600 font-semibold whitespace-nowrap">${displayUser}</td><td class="px-6 py-2.5 text-right text-gray-500 font-sans">${log.meta}</td>`; tbody.appendChild(tr);
+                const tr = document.createElement('tr'); tr.className = 'border-b border-gray-50 text-xs';
+                addTextCell(tr, 'px-6 py-2.5 text-gray-400 whitespace-nowrap', log.timestamp);
+                addTextCell(tr, 'px-6 py-2.5', log.operation);
+                addTextCell(tr, 'px-6 py-2.5 text-slate-700 font-medium', log.item);
+                const variationCell = addTextCell(tr, `px-6 py-2.5 text-center ${varClass}`, `${log.variation > 0 ? '+' : ''}${log.variation}`);
+                variationCell.setAttribute('aria-label', `Variación ${log.variation}`);
+                addTextCell(tr, 'px-6 py-2.5 text-center text-blue-600 font-semibold whitespace-nowrap', displayUser);
+                addTextCell(tr, 'px-6 py-2.5 text-right text-gray-500 font-sans', log.meta);
+                tbody.appendChild(tr);
             });
         }
         function clearHistoryLog() { if(currentRole !== 'Admin') return; historyLog = [{ timestamp: new Date().toLocaleString(), operation: 'LIMPIEZA', item: 'Log Limpiado', variation: 0, user: `Admin (${activePinCode})`, meta: 'Vaciado manual' }]; syncStorage(); renderHistoryLogTable(); showToast('Historial de bitácora reiniciado'); }
         function exportDataCSV() {
             if (historyLog.length === 0) { showToast('No hay registros que exportar', 'warning'); return; }
-            let csvContent = 'data:text/csv;charset=utf-8,'; csvContent += 'Fecha y Hora,Operacion,SKU_y_Producto,Variacion,Responsable_PIN,Detalle\n';
-            historyLog.forEach(row => {
-                let sanitizedMeta = row.meta.replace(/,/g, ' '); let sanitizedUser = row.user || 'Sistema'; let sanitizedItem = row.item.replace(/,/g, ' ');
-                if (currentRole !== 'Admin') sanitizedUser = sanitizedUser.replace(/\d{4}/g, '••••'); sanitizedUser = sanitizedUser.replace(/,/g, ' ');
-                csvContent += `"${row.timestamp}","${row.operation}","${sanitizedItem}",${row.variation},"${sanitizedUser}","${sanitizedMeta}"\n`;
-            });
-            const encodedUri = encodeURI(csvContent); const link = document.createElement('a'); link.setAttribute('href', encodedUri); link.setAttribute('download', `Reporte_Inventario_COP_${new Date().toISOString().slice(0,10)}.csv`); document.body.appendChild(link); link.click(); document.body.removeChild(link); showToast('Reporte descargado en formato CSV');
+            const csvCell = value => {
+                let text = String(value ?? '');
+                if (/^[\t\r\n ]*[=+\-@]/.test(text)) text = `'${text}`;
+                return `"${text.replace(/"/g, '""')}"`;
+            };
+            const rows = [
+                ['Fecha y Hora', 'Operacion', 'SKU_y_Producto', 'Variacion', 'Responsable_PIN', 'Detalle'],
+                ...historyLog.map(row => {
+                    let user = row.user || 'Sistema';
+                    if (currentRole !== 'Admin') user = user.replace(/\d{4}/g, '••••');
+                    return [row.timestamp, row.operation, row.item, row.variation, user, row.meta];
+                })
+            ];
+            const csvContent = `\uFEFF${rows.map(row => row.map((value, index) => index === 3 && typeof value === 'number' ? value : csvCell(value)).join(',')).join('\r\n')}`;
+            const fileUrl = URL.createObjectURL(new Blob([csvContent], { type: 'text/csv;charset=utf-8' }));
+            const link = document.createElement('a'); link.href = fileUrl; link.download = `Reporte_Inventario_COP_${new Date().toISOString().slice(0,10)}.csv`; document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(fileUrl), 1000); showToast('Reporte descargado en formato CSV');
         }
         function showToast(message, type = 'success') {
             const container = document.getElementById('toast-container'); const toast = document.createElement('div'); let bgClass = 'bg-slate-900 border-l-4 border-emerald-500 text-emerald-400'; if (type === 'error') bgClass = 'bg-rose-950 border-l-4 border-rose-500 text-rose-300'; if (type === 'warning') bgClass = 'bg-amber-950 border-l-4 border-amber-500 text-amber-300';
-            toast.className = `${bgClass} p-4 rounded-xl shadow-xl flex items-center justify-between min-w-[300px] transition duration-300 transform translate-y-4 opacity-0 text-xs font-semibold backdrop-blur-md`; toast.innerHTML = `<div class="flex items-center gap-2"><span>${message}</span></div>`; container.appendChild(toast); setTimeout(() => toast.classList.remove('translate-y-4', 'opacity-0'), 10); setTimeout(() => { toast.classList.add('opacity-0', 'translate-y-4'); setTimeout(() => toast.remove(), 300); }, 3000);
+            toast.className = `${bgClass} p-4 rounded-xl shadow-xl flex items-center justify-between min-w-[300px] transition duration-300 transform translate-y-4 opacity-0 text-xs font-semibold backdrop-blur-md`; toast.textContent = message; container.appendChild(toast); setTimeout(() => toast.classList.remove('translate-y-4', 'opacity-0'), 10); setTimeout(() => { toast.classList.add('opacity-0', 'translate-y-4'); setTimeout(() => toast.remove(), 300); }, 3000);
         }
     </script>
 </body>
